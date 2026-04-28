@@ -157,6 +157,132 @@ def is_flashinfer_allreduce_unavailable() -> bool:
     return _flashinfer_allreduce_unavailable
 
 
+def _preflight_check_workspace_memory(
+    world_size: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    cpu_group: Optional["torch.distributed.ProcessGroup"] = None,
+) -> bool:
+    """Collectively decide whether to enter create_allreduce_fusion_workspace.
+
+    If one rank OOMs in flashinfer's per-rank cuMemCreate and escapes via
+    the caller's try/except while peers are blocked in the cross-rank
+    handle exchange, the surviving rank stalls until the NCCL watchdog
+    aborts ~10 minutes later. Every rank probes a matching cuMemCreate
+    and votes on a CPU group so all ranks proceed or skip atomically.
+
+    Probes with the handle type flashinfer will use (FABRIC where
+    is_mnnvl_fabric_supported, POSIX_FD otherwise) since
+    torch.cuda.mem_get_info() doesn't reflect the fabric pool.
+    The probe transiently allocates the lamport buffer
+    (<= 3 * MAX_COMM_SIZE ~= 6 GiB) and releases it; runs once at
+    startup before the model occupies device memory. POSIX_FD FD-table
+    exhaustion is not modeled.
+    """
+    try:
+        import torch.distributed as dist
+        from cuda import cuda as _cu
+        from flashinfer.comm.mnnvl import is_mnnvl_fabric_supported
+
+        # Match flashinfer SymmDeviceMemory's exchanger selection
+        # (mnnvl.py:949-957) so the probe sees the same allocator.
+        if is_mnnvl_fabric_supported(torch.cuda.current_device()):
+            handle_type = _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+        else:
+            handle_type = (
+                _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+            )
+
+        dtype_bytes = torch.empty((), dtype=dtype).element_size()
+        # Mirror flashinfer's lamport sizing (trtllm_ar.py): per-comm size
+        # capped at MAX_COMM_SIZE, then x3 for the lamport buffer.
+        _MAX_COMM_SIZE = 2147483647 & ~((1 << 21) - 1)
+        lamport_comm_size = min(
+            world_size * max_token_num * hidden_dim * dtype_bytes,
+            _MAX_COMM_SIZE,
+        )
+        probe_size = 3 * lamport_comm_size
+
+        prop = _cu.CUmemAllocationProp()
+        prop.requestedHandleTypes = handle_type
+        prop.type = _cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+        prop.location = _cu.CUmemLocation()
+        prop.location.type = _cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+        prop.location.id = torch.cuda.current_device()
+        prop.allocFlags.gpuDirectRDMACapable = 1
+
+        err, gran = _cu.cuMemGetAllocationGranularity(
+            prop,
+            _cu.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+        )
+        if err != _cu.CUresult.CUDA_SUCCESS:
+            # Fail closed: granularity failure implies the real allocation
+            # would fail too.
+            logger.warning(
+                "FlashInfer workspace preflight: cuMemGetAllocationGranularity "
+                "failed (%s). Skipping allreduce fusion.",
+                err,
+            )
+            return False
+        aligned_probe = ((probe_size + gran - 1) // gran) * gran
+    except Exception as e:
+        # Setup couldn't run on this platform; fall through to the legacy
+        # per-rank try/except around create_allreduce_fusion_workspace.
+        logger.warning(
+            "FlashInfer workspace preflight bypassed (setup error: %s); "
+            "proceeding without the collective guard.",
+            e,
+        )
+        return True
+
+    local_ok = 0
+    handle = None
+    try:
+        err, handle = _cu.cuMemCreate(aligned_probe, prop, 0)
+        local_ok = 1 if err == _cu.CUresult.CUDA_SUCCESS else 0
+    finally:
+        if local_ok:
+            _cu.cuMemRelease(handle)
+
+    # Vote: any failure here must fail closed -- falling through to True
+    # would let some ranks enter flashinfer while others skip and hang.
+    try:
+        group = cpu_group
+        if group is None:
+            tp_group = get_tp_group()
+            if tp_group.world_size <= 1:
+                return local_ok == 1
+            group = tp_group.cpu_group
+
+        flag = torch.tensor([local_ok], dtype=torch.int32)
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+    except Exception as e:
+        logger.warning(
+            "FlashInfer workspace preflight vote failed (%s). "
+            "Skipping allreduce fusion.",
+            e,
+        )
+        return False
+
+    logger.debug(
+        "FlashInfer workspace preflight [rank %s]: probe=%.2f GB, "
+        "local_probe=%s, vote=%s",
+        dist.get_rank(group=group),
+        aligned_probe / 1e9,
+        "OK" if local_ok else "FAIL",
+        "PROCEED" if flag.item() == 1 else "SKIP",
+    )
+    if flag.item() == 0:
+        logger.warning(
+            "FlashInfer workspace preflight: cuMemCreate probe failed on at "
+            "least one rank. Skipping allreduce fusion to avoid cross-rank "
+            "desync inside the flashinfer collective."
+        )
+        return False
+    return True
+
+
 class FlashInferWorkspaceManager:
     def __init__(self):
         self.workspace = None
@@ -187,6 +313,20 @@ class FlashInferWorkspaceManager:
             return
 
         self.cleanup()
+
+        global _flashinfer_allreduce_unavailable
+        if not _preflight_check_workspace_memory(
+            world_size=world_size,
+            max_token_num=max_token_num,
+            hidden_dim=hidden_dim,
+            dtype=dtype,
+            cpu_group=cpu_group,
+        ):
+            _flashinfer_allreduce_unavailable = True
+            self.workspace = None
+            self.initialized = False
+            return
+
         try:
             kwargs = dict(
                 backend="trtllm",
@@ -210,7 +350,6 @@ class FlashInferWorkspaceManager:
                     **kwargs
                 )
         except Exception as e:
-            global _flashinfer_allreduce_unavailable
             _flashinfer_allreduce_unavailable = True
             logger.warning(
                 f"Failed to initialize FlashInfer workspace: {e}. "
