@@ -138,11 +138,11 @@ ARG SGL_KERNEL_VERSION=0.4.1.post1
 WORKDIR /sgl-workspace
 
 # Pre-built sgl-kernel wheel (CUDA 13, abi3 compatible with Python 3.12)
-RUN uv pip install --system --python python3.12 --force-reinstall --no-deps \
+RUN uv pip install --system --python python3.12 --break-system-packages --force-reinstall --no-deps \
     "https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl"
 
 # PyTorch ecosystem (cu130)
-RUN uv pip install --system --python python3.12 \
+RUN uv pip install --system --python python3.12 --break-system-packages \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     torch torchvision torchaudio ninja wheel packaging
 
@@ -155,7 +155,7 @@ RUN git clone --depth=1 -b pr-ports-20260428 https://github.com/licson/sglang.gi
     && echo '__version__ = "0.0.0"' > sglang/version.py \
     && touch README.md \
     && touch LICENSE \
-    && uv pip install --system --python python3.12 ".[${BUILD_TYPE}]" \
+    && uv pip install --system --python python3.12 --break-system-packages ".[${BUILD_TYPE}]" \
     && uv pip freeze --system > /sgl-workspace/constraints.txt \
     && sed -i '/^sglang==/d' /sgl-workspace/constraints.txt \
     && cd / && rm -rf /tmp/sglang
@@ -219,6 +219,13 @@ ENV MAX_JOBS=${MAX_JOBS}
 
 RUN python3 setup.py bdist_wheel -d /wheels
 
+# Build flashinfer-cubin wheel (requires main flashinfer package installed)
+RUN uv pip install --system --python python3.12 --break-system-packages --no-deps /wheels/flashinfer*.whl \
+    && uv pip install --system --python python3.12 --break-system-packages build \
+    && cd /build/flashinfer/flashinfer-cubin \
+    && python3 -m build --no-isolation --wheel \
+    && cp dist/*.whl /wheels/
+
 
 # =============================================================================
 # DeepGEMM Builder Stage
@@ -251,10 +258,10 @@ COPY --from=flashinfer_builder /wheels /tmp/wheels
 COPY --from=deepgemm_builder /wheels /tmp/wheels
 
 # Install Mooncake (PD disaggregation support, CUDA 13 variant)
-RUN uv pip install --system --python python3.12 mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}
+RUN uv pip install --system --python python3.12 --break-system-packages mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}
 
 # Install builder wheels using constraints to avoid version skew
-RUN uv pip install --system --python python3.12 \
+RUN uv pip install --system --python python3.12 --break-system-packages \
     -c /sgl-workspace/constraints.txt \
     /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
@@ -269,7 +276,7 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-p
 RUN git clone --depth=1 -b pr-ports-20260428 https://github.com/licson/sglang.git /sgl-workspace/sglang
 
 RUN cd /sgl-workspace/sglang \
-    && uv pip install --system --python python3.12 --no-deps -e "python[${BUILD_TYPE}]" \
+    && uv pip install --system --python python3.12 --break-system-packages --no-deps -e "python[${BUILD_TYPE}]" \
     && kernels lock python \
     && ( success=0; for i in 1 2 3; do \
             echo "Attempt $i/3: downloading sgl-kernel cubins..." && \
@@ -282,12 +289,12 @@ RUN cd /sgl-workspace/sglang \
 
 # Install dflash
 RUN git clone https://github.com/z-lab/dflash.git /workspace/dflash \
-    && uv pip install --system --python python3.12 \
+    && uv pip install --system --python python3.12 --break-system-packages \
         -c /sgl-workspace/constraints.txt \
         -e "/workspace/dflash[sglang]"
 
 # Install latest transformers from HuggingFace
-RUN uv pip install --system --python python3.12 \
+RUN uv pip install --system --python python3.12 --break-system-packages \
     -c /sgl-workspace/constraints.txt \
     git+https://github.com/huggingface/transformers.git
 
