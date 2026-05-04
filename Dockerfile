@@ -180,6 +180,9 @@ RUN curl --retry 3 --retry-delay 2 -fsSL -o ${DEEPEP_COMMIT}.zip \
     && sed -i 's/#define NUM_TIMEOUT_CYCLES 200000000000ull/#define NUM_TIMEOUT_CYCLES 2000000000000ull/' csrc/kernels/configs.cuh
 
 RUN cd /build/DeepEP \
+    && if [ "${CUDA_VERSION%%.*}" = "13" ]; then \
+        sed -i "/^    include_dirs = \['csrc\/'\]/a\\    include_dirs.append('${CUDA_HOME}/include/cccl')" setup.py; \
+    fi \
     && case "$CUDA_VERSION" in \
         12.6.1) CHOSEN_TORCH_CUDA_ARCH_LIST='9.0' ;; \
         12.8.1) CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0' ;; \
