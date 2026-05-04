@@ -220,7 +220,7 @@ ENV TORCH_CUDA_ARCH_LIST="12.1"
 ENV FLASHINFER_CUDA_ARCH_LIST="12.1a"
 ENV MAX_JOBS=${MAX_JOBS}
 
-RUN python3 setup.py bdist_wheel -d /wheels
+RUN python3 -m pip wheel . --no-deps --no-build-isolation -w /wheels
 
 # Build flashinfer-cubin wheel (requires main flashinfer package installed)
 RUN uv pip install --system --python python3.12 --break-system-packages --no-deps /wheels/flashinfer*.whl \
