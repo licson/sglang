@@ -240,7 +240,7 @@ WORKDIR /build
 RUN git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git /build/DeepGEMM
 WORKDIR /build/DeepGEMM
 
-RUN python3 -m pip wheel . --no-deps -w /wheels
+RUN python3 -m pip wheel . --no-deps --no-build-isolation -w /wheels
 
 
 # =============================================================================
