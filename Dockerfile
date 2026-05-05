@@ -263,9 +263,8 @@ COPY --from=deepgemm_builder /wheels /tmp/wheels
 # Install Mooncake (PD disaggregation support, CUDA 13 variant)
 RUN uv pip install --system --python python3.12 --break-system-packages mooncake-transfer-engine-cuda13==${MOONCAKE_VERSION}
 
-# Install builder wheels using constraints to avoid version skew
+# Install builder wheels (no constraints needed - we built them ourselves)
 RUN uv pip install --system --python python3.12 --break-system-packages \
-    -c /sgl-workspace/constraints.txt \
     /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
 
