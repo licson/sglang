@@ -159,6 +159,7 @@ RUN git clone --depth=1 -b pr-ports-20260428 https://github.com/licson/sglang.gi
     && uv pip freeze --system > /sgl-workspace/constraints.txt \
     && sed -i '/^sglang==/d' /sgl-workspace/constraints.txt \
     && sed -i '/^-e /d' /sgl-workspace/constraints.txt \
+    && sed -i '/ @ file:\/\//d' /sgl-workspace/constraints.txt \
     && cd / && rm -rf /tmp/sglang
 
 
@@ -290,8 +291,9 @@ RUN cd /sgl-workspace/sglang \
     && mv python/kernels.lock /root/.cache/sglang/ \
     && find /usr/local/lib/python3.12/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-# Remove stale editable paths from constraints before using them
-RUN sed -i '/^-e /d' /sgl-workspace/constraints.txt
+# Remove stale editable / local-path references from constraints before using them
+RUN sed -i '/^-e /d' /sgl-workspace/constraints.txt \
+    && sed -i '/ @ file:\/\//d' /sgl-workspace/constraints.txt
 
 # Install dflash
 RUN git clone https://github.com/z-lab/dflash.git /workspace/dflash \
