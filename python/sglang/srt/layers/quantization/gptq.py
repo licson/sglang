@@ -1321,9 +1321,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
             if self.quant_config.desc_act:
-                w2_scales_size = intermediate_size_per_partition
-            else:
                 w2_scales_size = intermediate_size_per_partition * layer.moe_tp_size
+            else:
+                w2_scales_size = intermediate_size_per_partition
             scales_size2 = w2_scales_size // self.quant_config.group_size
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
@@ -1528,7 +1528,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
-        assert get_moe_runner_backend().is_auto()
+        if not get_moe_runner_backend().is_auto():
+            logger.warning(
+                "GPTQ Marlin MoE forces MARLIN backend; ignoring user-specified backend."
+            )
         self.moe_runner_config = moe_runner_config
         self.runner = MoeRunner(MoeRunnerBackend.MARLIN, moe_runner_config)
 
