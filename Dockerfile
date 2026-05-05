@@ -155,6 +155,7 @@ RUN git clone --depth=1 -b pr-ports-20260428 https://github.com/licson/sglang.gi
     && echo '__version__ = "0.0.0"' > sglang/version.py \
     && touch README.md \
     && touch LICENSE \
+    && sed -i 's/transformers==5\.6\.0/transformers/g' pyproject.toml \
     && uv pip install --system --python python3.12 --break-system-packages ".[${BUILD_TYPE}]" \
     && uv pip freeze --system > /sgl-workspace/constraints.txt \
     && sed -i '/^sglang==/d' /sgl-workspace/constraints.txt \
@@ -280,6 +281,7 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-p
 RUN git clone --depth=1 -b pr-ports-20260428 https://github.com/licson/sglang.git /sgl-workspace/sglang
 
 RUN cd /sgl-workspace/sglang \
+    && sed -i 's/transformers==5\.6\.0/transformers/g' python/pyproject.toml \
     && uv pip install --system --python python3.12 --break-system-packages --no-deps -e "python[${BUILD_TYPE}]" \
     && kernels lock python \
     && ( success=0; for i in 1 2 3; do \
