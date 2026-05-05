@@ -158,6 +158,7 @@ RUN git clone --depth=1 -b pr-ports-20260428 https://github.com/licson/sglang.gi
     && uv pip install --system --python python3.12 --break-system-packages ".[${BUILD_TYPE}]" \
     && uv pip freeze --system > /sgl-workspace/constraints.txt \
     && sed -i '/^sglang==/d' /sgl-workspace/constraints.txt \
+    && sed -i '/^-e /d' /sgl-workspace/constraints.txt \
     && cd / && rm -rf /tmp/sglang
 
 
