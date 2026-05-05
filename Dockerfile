@@ -288,9 +288,9 @@ RUN cd /sgl-workspace/sglang \
             echo "Attempt $i/3: downloading sgl-kernel cubins..." && \
             kernels download python && success=1 && break; \
             echo "sgl-kernel cubin download failed, retrying in 30s..." && sleep 30; \
-        done; [ "$success" = "1" ] ) \
+        done; [ "$success" = "1" ] || echo "Warning: sgl-kernel cubin download failed, continuing without cubins" ) \
     && mkdir -p /root/.cache/sglang \
-    && mv python/kernels.lock /root/.cache/sglang/ \
+    && if [ -f python/kernels.lock ]; then mv python/kernels.lock /root/.cache/sglang/; fi \
     && find /usr/local/lib/python3.12/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
 # Remove stale editable / local-path references from constraints before using them
