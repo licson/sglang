@@ -290,6 +290,9 @@ RUN cd /sgl-workspace/sglang \
     && mv python/kernels.lock /root/.cache/sglang/ \
     && find /usr/local/lib/python3.12/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
+# Remove stale editable paths from constraints before using them
+RUN sed -i '/^-e /d' /sgl-workspace/constraints.txt
+
 # Install dflash
 RUN git clone https://github.com/z-lab/dflash.git /workspace/dflash \
     && uv pip install --system --python python3.12 --break-system-packages \
