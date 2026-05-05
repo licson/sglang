@@ -1,20 +1,13 @@
-"""Real-distributed integration tests for FlashInfer fusion workspace preflight.
-
-Spawns multiple processes on real CUDA devices (no mocks) and exercises
-`_preflight_check_workspace_memory` from
-`sglang.srt.layers.flashinfer_comm_fusion`:
-
-- happy path: every rank's probe succeeds, vote returns PROCEED
-- skewed path: rank 0 pre-pins enough memory that its probe must fail,
-  every rank's vote returns SKIP (i.e. failure is *broadcast*)
-"""
+"""Distributed tests for FlashInfer allreduce-fusion workspace preflight."""
 
 import multiprocessing as mp
 import os
+import socket
 import unittest
 
 import torch
 
+from sglang.srt.utils import get_cuda_driver_bindings, is_flashinfer_available
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_utils import CustomTestCase
 
@@ -23,11 +16,18 @@ register_cuda_ci(est_time=30, suite="stage-b-test-2-gpu-large")
 WORLD_SIZE = 2
 
 
-def _run_rank(rank, world_size, scenario, result_q):
-    """Worker entrypoint. Each rank runs end-to-end in its own process."""
+def _get_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _run_rank(rank, world_size, port, scenario, result_q):
+    held = None
+    cuda_driver = None
     try:
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29512")
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["LOCAL_RANK"] = str(rank)
@@ -44,12 +44,10 @@ def _run_rank(rank, world_size, scenario, result_q):
         cpu_group = dist.group.WORLD
 
         from sglang.srt.layers.flashinfer_comm_fusion import (
+            _make_flashinfer_workspace_allocation_prop,
             _preflight_check_workspace_memory,
         )
 
-        # Mirror an 8-way TP lamport probe (~6 GiB after the MAX_COMM_SIZE cap
-        # x3): big enough that the starvation scenario reliably exhausts the
-        # rank-0 device pool, small enough not to OOM a healthy rank.
         probe_kwargs = dict(
             world_size=8,
             max_token_num=2048,
@@ -58,50 +56,32 @@ def _run_rank(rank, world_size, scenario, result_q):
             cpu_group=cpu_group,
         )
 
-        held = None
         if scenario == "rank0_starved" and rank == 0:
-            # Pin almost all of GPU 0's memory so the probe's cuMemCreate
-            # has nowhere to land. Use cuMemCreate (matches the probe path)
-            # rather than torch.empty so we starve the same allocator pool.
-            from cuda import cuda as _cu
+            cuda_driver = get_cuda_driver_bindings()
+            prop = _make_flashinfer_workspace_allocation_prop(cuda_driver)
 
             free, _total = torch.cuda.mem_get_info(rank)
-            # Leave only ~1 GiB so the ~6 GiB lamport probe must fail.
             target = max(free - (1 << 30), 0)
-
-            prop = _cu.CUmemAllocationProp()
-            prop.requestedHandleTypes = (
-                _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+            granularity_flag = (
+                cuda_driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED
             )
-            prop.type = _cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
-            prop.location = _cu.CUmemLocation()
-            prop.location.type = _cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-            prop.location.id = rank
-            prop.allocFlags.gpuDirectRDMACapable = 1
-
-            err, gran = _cu.cuMemGetAllocationGranularity(
+            err, gran = cuda_driver.cuMemGetAllocationGranularity(
                 prop,
-                _cu.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+                granularity_flag,
             )
-            assert err == _cu.CUresult.CUDA_SUCCESS, err
+            assert err == cuda_driver.CUresult.CUDA_SUCCESS, err
             aligned = (target // gran) * gran
-            err, held = _cu.cuMemCreate(aligned, prop, 0)
-            assert err == _cu.CUresult.CUDA_SUCCESS, (err, aligned)
+            assert aligned > 0, "not enough free memory to starve the preflight"
+            err, held = cuda_driver.cuMemCreate(aligned, prop, 0)
+            assert err == cuda_driver.CUresult.CUDA_SUCCESS, (err, aligned)
 
-        try:
-            decision = _preflight_check_workspace_memory(**probe_kwargs)
-        finally:
-            if held is not None:
-                from cuda import cuda as _cu
-
-                _cu.cuMemRelease(held)
-
-        # The vote must be unanimous. Make every rank report so the parent
-        # can assert all of them, not just rank 0.
+        decision = _preflight_check_workspace_memory(**probe_kwargs)
         result_q.put((rank, "ok", bool(decision)))
     except Exception as e:  # pragma: no cover - debug path
         result_q.put((rank, "err", repr(e)))
     finally:
+        if held is not None:
+            cuda_driver.cuMemRelease(held)
         try:
             import torch.distributed as dist
 
@@ -111,25 +91,34 @@ def _run_rank(rank, world_size, scenario, result_q):
             pass
 
 
-def _spawn_and_collect(scenario, world_size=WORLD_SIZE, port=29512):
+def _spawn_and_collect(scenario, world_size=WORLD_SIZE):
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
+    port = _get_free_port()
     procs = []
-    for r in range(world_size):
-        p = ctx.Process(
+    for rank in range(world_size):
+        proc = ctx.Process(
             target=_run_rank,
-            args=(r, world_size, scenario, q),
+            args=(rank, world_size, port, scenario, q),
         )
-        p.start()
-        procs.append(p)
+        proc.start()
+        procs.append(proc)
 
-    results = {}
-    for _ in range(world_size):
-        rank, status, payload = q.get(timeout=300)
-        results[rank] = (status, payload)
-    for p in procs:
-        p.join(timeout=60)
-        assert p.exitcode == 0, f"rank exited with {p.exitcode}"
+    try:
+        results = {}
+        for _ in range(world_size):
+            rank, status, payload = q.get(timeout=300)
+            results[rank] = (status, payload)
+
+        for proc in procs:
+            proc.join(timeout=60)
+            assert proc.exitcode == 0, f"rank exited with {proc.exitcode}"
+    finally:
+        for proc in procs:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=10)
+
     return results
 
 
@@ -140,27 +129,33 @@ class TestFlashInferPreflightDistributed(CustomTestCase):
             raise unittest.SkipTest(
                 f"Need {WORLD_SIZE} CUDA devices, got {torch.cuda.device_count()}"
             )
+        if not is_flashinfer_available():
+            raise unittest.SkipTest("FlashInfer is not available")
         try:
-            from cuda import cuda  # noqa: F401
+            from sglang.srt.layers.flashinfer_comm_fusion import (
+                _make_flashinfer_workspace_allocation_prop,
+            )
+
+            cuda_driver = get_cuda_driver_bindings()
+            _make_flashinfer_workspace_allocation_prop(cuda_driver)
         except Exception as e:
-            raise unittest.SkipTest(f"cuda-python not importable: {e}")
+            raise unittest.SkipTest(
+                f"FlashInfer preflight dependencies unavailable: {e}"
+            )
 
     def test_happy_path_votes_proceed(self):
-        """Normal probe: every rank's local probe succeeds -> PROCEED."""
         results = _spawn_and_collect("normal")
         for rank, (status, payload) in results.items():
             self.assertEqual(status, "ok", f"rank {rank}: {payload}")
             self.assertTrue(payload, f"rank {rank} voted SKIP unexpectedly")
 
     def test_starved_rank_broadcasts_skip(self):
-        """One starved rank fails its probe; all ranks must agree to SKIP."""
         results = _spawn_and_collect("rank0_starved")
         for rank, (status, payload) in results.items():
             self.assertEqual(status, "ok", f"rank {rank}: {payload}")
             self.assertFalse(
                 payload,
-                f"rank {rank} voted PROCEED but rank 0 was starved -- "
-                "vote did not propagate, this is the original hang bug",
+                f"rank {rank} voted PROCEED but rank 0 was starved",
             )
 
 

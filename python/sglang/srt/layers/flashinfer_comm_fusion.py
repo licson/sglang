@@ -18,7 +18,11 @@ from sglang.srt.distributed import (
     get_tp_group,
 )
 from sglang.srt.environ import envs
-from sglang.srt.utils import is_flashinfer_available
+from sglang.srt.utils import (
+    ceil_align,
+    get_cuda_driver_bindings,
+    is_flashinfer_available,
+)
 from sglang.srt.utils.custom_op import register_custom_op
 
 logger = logging.getLogger(__name__)
@@ -157,6 +161,109 @@ def is_flashinfer_allreduce_unavailable() -> bool:
     return _flashinfer_allreduce_unavailable
 
 
+def _make_flashinfer_workspace_allocation_prop(cuda_driver):
+    if _should_force_posix_fd_transport():
+        handle_type = (
+            cuda_driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        )
+    else:
+        from flashinfer.comm.mnnvl import is_mnnvl_fabric_supported
+
+        if is_mnnvl_fabric_supported(torch.cuda.current_device()):
+            handle_type = (
+                cuda_driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+            )
+        else:
+            handle_type = (
+                cuda_driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+            )
+
+    prop = cuda_driver.CUmemAllocationProp()
+    prop.requestedHandleTypes = handle_type
+    prop.type = cuda_driver.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+    prop.location = cuda_driver.CUmemLocation()
+    prop.location.type = cuda_driver.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+    prop.location.id = torch.cuda.current_device()
+    prop.allocFlags.gpuDirectRDMACapable = 1
+    return prop
+
+
+def _flashinfer_trtllm_workspace_allocation_sizes(
+    cuda_driver,
+    prop,
+    world_size: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+) -> list[int]:
+    """Mirror FlashInfer TRTLLM SymmDeviceMemory local allocation sizes."""
+    elem_size = 4 if dtype == torch.float32 else 2
+    buffer_size = world_size * max_token_num * hidden_dim * 2
+    flag_size = world_size * 256 * 4
+
+    max_comm_size = 2147483647 & ~((1 << 21) - 1)
+    lamport_comm_size = min(
+        world_size * max_token_num * hidden_dim * elem_size,
+        max_comm_size,
+    )
+    lamport_buffer_size = lamport_comm_size * 3
+
+    # trtllm_create_ipc_workspace_for_all_reduce_fusion rounds each logical
+    # buffer to 2 MiB before passing it to SymmDeviceMemory.
+    buffer_sizes = (
+        ceil_align(size, 1 << 21)
+        for size in (buffer_size, flag_size, lamport_buffer_size)
+    )
+
+    signal_pad_size = 2048
+    allocation_sizes = []
+    for buffer_size in buffer_sizes:
+        err, alloc_granularity = cuda_driver.cuMemGetAllocationGranularity(
+            prop,
+            cuda_driver.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+        )
+        if err != cuda_driver.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(
+                "cuMemGetAllocationGranularity failed for FlashInfer "
+                f"workspace preflight: {err}"
+            )
+
+        allocation_size = ceil_align(buffer_size + signal_pad_size, alloc_granularity)
+
+        mc_prop = cuda_driver.CUmulticastObjectProp()
+        mc_prop.numDevices = world_size
+        mc_prop.size = allocation_size
+        mc_prop.handleTypes = prop.requestedHandleTypes
+
+        err, mc_granularity = cuda_driver.cuMulticastGetGranularity(
+            mc_prop,
+            cuda_driver.CUmulticastGranularity_flags.CU_MULTICAST_GRANULARITY_RECOMMENDED,
+        )
+        if err != cuda_driver.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(
+                "cuMulticastGetGranularity failed for FlashInfer "
+                f"workspace preflight: {err}"
+            )
+
+        allocation_size = ceil_align(allocation_size, mc_granularity)
+        allocation_sizes.append(allocation_size)
+    return allocation_sizes
+
+
+def _probe_cumem_create_sequence(cuda_driver, allocation_sizes, prop) -> bool:
+    handles = []
+    try:
+        for allocation_size in allocation_sizes:
+            err, handle = cuda_driver.cuMemCreate(allocation_size, prop, 0)
+            if err != cuda_driver.CUresult.CUDA_SUCCESS:
+                return False
+            handles.append(handle)
+        return True
+    finally:
+        for handle in reversed(handles):
+            cuda_driver.cuMemRelease(handle)
+
+
 def _preflight_check_workspace_memory(
     world_size: int,
     max_token_num: int,
@@ -164,112 +271,52 @@ def _preflight_check_workspace_memory(
     dtype: torch.dtype,
     cpu_group: Optional["torch.distributed.ProcessGroup"] = None,
 ) -> bool:
-    """Collectively decide whether to enter create_allreduce_fusion_workspace.
+    """Collectively decide whether to enter FlashInfer workspace creation.
 
-    If one rank OOMs in flashinfer's per-rank cuMemCreate and escapes via
-    the caller's try/except while peers are blocked in the cross-rank
-    handle exchange, the surviving rank stalls until the NCCL watchdog
-    aborts ~10 minutes later. Every rank probes a matching cuMemCreate
-    and votes on a CPU group so all ranks proceed or skip atomically.
-
-    Probes with the handle type flashinfer will use (FABRIC where
-    is_mnnvl_fabric_supported, POSIX_FD otherwise) since
-    torch.cuda.mem_get_info() doesn't reflect the fabric pool.
-    The probe transiently allocates the lamport buffer
-    (<= 3 * MAX_COMM_SIZE ~= 6 GiB) and releases it; runs once at
-    startup before the model occupies device memory. POSIX_FD FD-table
-    exhaustion is not modeled.
+    FlashInfer TRTLLM workspaces allocate several SymmDeviceMemory buffers and
+    then exchange handles across ranks. If one rank fails local cuMemCreate and
+    exits while peers enter handle exchange, peers can hang until the watchdog
+    aborts. Probe the same handle type and allocation sequence first, then vote
+    on a CPU group so all ranks proceed or skip together.
     """
+    import torch.distributed as dist
+
+    group = cpu_group
+    if group is None:
+        tp_group = get_tp_group()
+        if tp_group.world_size <= 1:
+            return True
+        group = tp_group.cpu_group
+
+    allocation_sizes = []
     try:
-        import torch.distributed as dist
-        from cuda import cuda as _cu
-        from flashinfer.comm.mnnvl import is_mnnvl_fabric_supported
-
-        # Match flashinfer SymmDeviceMemory's exchanger selection
-        # (mnnvl.py:949-957) so the probe sees the same allocator.
-        if is_mnnvl_fabric_supported(torch.cuda.current_device()):
-            handle_type = _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
-        else:
-            handle_type = (
-                _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-            )
-
-        dtype_bytes = torch.empty((), dtype=dtype).element_size()
-        # Mirror flashinfer's lamport sizing (trtllm_ar.py): per-comm size
-        # capped at MAX_COMM_SIZE, then x3 for the lamport buffer.
-        _MAX_COMM_SIZE = 2147483647 & ~((1 << 21) - 1)
-        lamport_comm_size = min(
-            world_size * max_token_num * hidden_dim * dtype_bytes,
-            _MAX_COMM_SIZE,
-        )
-        probe_size = 3 * lamport_comm_size
-
-        prop = _cu.CUmemAllocationProp()
-        prop.requestedHandleTypes = handle_type
-        prop.type = _cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
-        prop.location = _cu.CUmemLocation()
-        prop.location.type = _cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
-        prop.location.id = torch.cuda.current_device()
-        prop.allocFlags.gpuDirectRDMACapable = 1
-
-        err, gran = _cu.cuMemGetAllocationGranularity(
+        cuda_driver = get_cuda_driver_bindings()
+        prop = _make_flashinfer_workspace_allocation_prop(cuda_driver)
+        allocation_sizes = _flashinfer_trtllm_workspace_allocation_sizes(
+            cuda_driver,
             prop,
-            _cu.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+            world_size,
+            max_token_num,
+            hidden_dim,
+            dtype,
         )
-        if err != _cu.CUresult.CUDA_SUCCESS:
-            # Fail closed: granularity failure implies the real allocation
-            # would fail too.
-            logger.warning(
-                "FlashInfer workspace preflight: cuMemGetAllocationGranularity "
-                "failed (%s). Skipping allreduce fusion.",
-                err,
-            )
-            return False
-        aligned_probe = ((probe_size + gran - 1) // gran) * gran
-    except Exception as e:
-        # Setup couldn't run on this platform; fall through to the legacy
-        # per-rank try/except around create_allreduce_fusion_workspace.
-        logger.warning(
-            "FlashInfer workspace preflight bypassed (setup error: %s); "
-            "proceeding without the collective guard.",
-            e,
-        )
-        return True
-
-    local_ok = 0
-    handle = None
-    try:
-        err, handle = _cu.cuMemCreate(aligned_probe, prop, 0)
-        local_ok = 1 if err == _cu.CUresult.CUDA_SUCCESS else 0
-    finally:
-        if local_ok:
-            _cu.cuMemRelease(handle)
-
-    # Vote: any failure here must fail closed -- falling through to True
-    # would let some ranks enter flashinfer while others skip and hang.
-    try:
-        group = cpu_group
-        if group is None:
-            tp_group = get_tp_group()
-            if tp_group.world_size <= 1:
-                return local_ok == 1
-            group = tp_group.cpu_group
-
-        flag = torch.tensor([local_ok], dtype=torch.int32)
-        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+        local_ok = _probe_cumem_create_sequence(cuda_driver, allocation_sizes, prop)
     except Exception as e:
         logger.warning(
-            "FlashInfer workspace preflight vote failed (%s). "
+            "FlashInfer workspace preflight probe failed (%s). "
             "Skipping allreduce fusion.",
             e,
         )
-        return False
+        local_ok = False
+
+    flag = torch.tensor([1 if local_ok else 0], dtype=torch.int32)
+    dist.all_reduce(flag, op=dist.ReduceOp.BAND, group=group)
 
     logger.debug(
         "FlashInfer workspace preflight [rank %s]: probe=%.2f GB, "
         "local_probe=%s, vote=%s",
         dist.get_rank(group=group),
-        aligned_probe / 1e9,
+        sum(allocation_sizes) / 1e9,
         "OK" if local_ok else "FAIL",
         "PROCEED" if flag.item() == 1 else "SKIP",
     )
