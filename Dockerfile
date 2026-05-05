@@ -295,11 +295,10 @@ RUN cd /sgl-workspace/sglang \
 RUN sed -i '/^-e /d' /sgl-workspace/constraints.txt \
     && sed -i '/ @ file:\/\//d' /sgl-workspace/constraints.txt
 
-# Install dflash
+# Install dflash (without its pinned sglang git dep — our editable fork already satisfies it)
 RUN git clone https://github.com/z-lab/dflash.git /workspace/dflash \
-    && uv pip install --system --python python3.12 --break-system-packages \
-        -c /sgl-workspace/constraints.txt \
-        -e "/workspace/dflash[sglang]"
+    && uv pip install --system --python python3.12 --break-system-packages --no-deps \
+        -e "/workspace/dflash"
 
 # Install latest transformers from HuggingFace
 RUN uv pip install --system --python python3.12 --break-system-packages \
