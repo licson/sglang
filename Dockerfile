@@ -302,9 +302,8 @@ RUN git clone https://github.com/z-lab/dflash.git /workspace/dflash \
     && uv pip install --system --python python3.12 --break-system-packages --no-deps \
         -e "/workspace/dflash"
 
-# Install latest transformers from HuggingFace
+# Install latest transformers from HuggingFace (unconstrained — user wants latest git)
 RUN uv pip install --system --python python3.12 --break-system-packages \
-    -c /sgl-workspace/constraints.txt \
     git+https://github.com/huggingface/transformers.git
 
 WORKDIR /sgl-workspace/sglang
