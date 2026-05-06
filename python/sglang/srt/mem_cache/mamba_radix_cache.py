@@ -527,6 +527,10 @@ class MambaRadixCache(BasePrefixCache):
             )
             if cache_len is None:
                 cache_len = 0
+            # Defensive clamp: if kv_committed_len under-counts (e.g. due to a
+            # speculative-decoding accounting bug), never claim more tokens than
+            # actually exist.
+            cache_len = min(cache_len, len(token_ids))
             if cache_len != len(token_ids):
                 cache_end_idx = max(cache_len, req.cache_protected_len)
                 self.token_to_kv_pool_allocator.free(kv_indices[cache_end_idx:])

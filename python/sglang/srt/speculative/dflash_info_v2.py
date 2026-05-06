@@ -197,6 +197,9 @@ class DFlashDraftInputV2(SpecInput):
             reserved_seq_lens_sum += reserved_len
             num_needed_tokens += reserved_len - cur_alloc_len
 
+            # Pre-claim bonus slot here (like normal decode); resolve subtracts 1.
+            req.kv_committed_len += 1
+
             if top_k > max_top_k:
                 max_top_k = top_k
             if i == 0:
