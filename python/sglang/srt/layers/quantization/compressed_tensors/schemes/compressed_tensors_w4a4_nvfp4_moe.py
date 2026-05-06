@@ -279,7 +279,7 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
             layer.cutlass_moe_params = CutlassMoEParams(
                 CutlassMoEType.BlockscaledFP4,
                 layer.w13_weight.device,
-                num_experts=layer.num_experts,
+                num_experts=layer.num_local_experts,
                 intermediate_size_per_partition=layer.w2_weight.shape[2] * 2,
                 hidden_size=layer.w13_weight.shape[2] * 2,
             )
