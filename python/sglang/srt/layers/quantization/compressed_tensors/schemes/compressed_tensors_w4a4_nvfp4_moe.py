@@ -385,6 +385,34 @@ class CompressedTensorsW4A4Nvfp4MoE(CompressedTensorsMoEScheme):
 
             topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
 
+            # When EP > 1, StandardDispatcher keeps topk_ids in global space for
+            # flashinfer_cutlass backend, but cutlass_moe_fp4 expects local
+            # expert IDs that index directly into per-rank weight tensors.
+            if layer.moe_ep_size > 1:
+                num_local_routed = (
+                    layer.num_local_experts - layer.num_fused_shared_experts
+                )
+                routed_start = layer.moe_ep_rank * num_local_routed
+                routed_end = routed_start + num_local_routed
+                is_local_routed = (topk_ids >= routed_start) & (topk_ids < routed_end)
+                if layer.num_fused_shared_experts > 0:
+                    shared_start = layer.num_experts - layer.num_fused_shared_experts
+                    shared_end = layer.num_experts
+                    is_local_shared = (topk_ids >= shared_start) & (
+                        topk_ids < shared_end
+                    )
+                else:
+                    is_local_shared = torch.zeros_like(is_local_routed)
+                local_mask = is_local_routed | is_local_shared
+                local_topk_ids = topk_ids.clone()
+                local_topk_ids[is_local_routed] -= routed_start
+                if layer.num_fused_shared_experts > 0:
+                    local_topk_ids[is_local_shared] -= shared_start - num_local_routed
+                topk_ids = torch.where(
+                    local_mask, local_topk_ids, torch.zeros_like(local_topk_ids)
+                )
+                topk_weights = topk_weights * local_mask.to(topk_weights.dtype)
+
             output = cutlass_moe_fp4(
                 a=x,
                 a1_gscale=layer.w13_input_scale_quant,
