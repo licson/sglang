@@ -202,7 +202,7 @@ RUN cd /build/DeepEP \
 FROM torch_deps AS flashinfer_builder
 
 ARG MAX_JOBS=8
-ARG FI_PR_NUMBERS="3173 3174 3175 3180 3192 3193"
+ARG FI_PR_NUMBERS="3174 3180"
 
 WORKDIR /build
 
