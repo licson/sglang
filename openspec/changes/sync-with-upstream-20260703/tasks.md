@@ -91,28 +91,28 @@
 
 ## 12. Document sync decision in AGENTS.md (Phase 6)
 
-- [ ] 12.1 Verify `AGENTS.md` exists at the repo root; create it if absent.
-- [ ] 12.2 Append a new section titled `## Upstream sync 2026-07-03`.
-- [ ] 12.3 Record the upstream commit synced to (the SHA resolved at task 2.5).
-- [ ] 12.4 Record the list of dropped fork-only commits with their superseding upstream PRs:
+- [x] 12.1 Verify `AGENTS.md` exists at the repo root; create it if absent. ✓ Did not exist; created at `/root/sglang/AGENTS.md` (55 lines).
+- [x] 12.2 Append a new section titled `## Upstream sync 2026-07-03`. ✓
+- [x] 12.3 Record the upstream commit synced to (the SHA resolved at task 2.5). ✓ `cba3801f5214a6423561bd1727a0c65ddcf12437` (full SHA).
+- [x] 12.4 Record the list of dropped fork-only commits with their superseding upstream PRs: ✓ 4 dropped categories documented (dFlash port ~15 commits → #23000, #27950, #27959, #29228, #29220, #29678; dFlash mamba cleanup `a722fee6a` → moot; `MambaPoolConfigurator` `d10e980d5` + `625770e2d` → upstream's `handle_max_mamba_cache`; flashinfer preflight 6 commits `3cce2876e` + follow-ups → PR #24172 by same author).
   - dFlash spec v2 port (~15 commits, `70bdac0da` etc.) → upstream PRs #23000, #27950, #27959, #29228, #29220, #29678
   - dFlash mamba cleanup (`a722fee6a`) → moot without dFlash port
   - `MambaPoolConfigurator` (`d10e980d5`, `625770e2d`) → upstream's evolved `handle_max_mamba_cache`
   - flashinfer preflight (6 commits, `3cce2876e` + follow-ups) → upstream PR #24172 (byte-for-byte equivalent, same author)
-- [ ] 12.5 Record the list of re-applied surviving fixes with their new locations:
+- [x] 12.5 Record the list of re-applied surviving fixes with their new locations: ✓ 6 surviving fixes documented with original fork commit, new file location, and re-application commit hash (`6b6b45600`, `6842ed50f`, `a15c82fd1`, `07c39e5b5`, `d215a85ed`; auto-merged `746ff3c87`). Plus 5 auto-merged fixes (NVFP4 3 commits, HF rope params, moe_wna16 GELU) verified present.
   - GPTQ MoE fixes (3 commits) → new `gptq/schemes/` layout
   - NVFP4 Cutlass MoE fixes (3 commits) → verified in `compressed_tensors/schemes/w4a4_nvfp4_moe.py`
   - CUDA-graph disable on `--cpu-offload-gb` → re-applied in evolved `server_args.py`
   - `--disable-cuda-graph-padding × --enable-torch-compile` assert → re-applied in evolved `server_args.py`
   - HF rope params fix → verified in `hf_transformers_patches.py`
   - moe_wna16 GELU fix → verified in `moe_wna16.py`
-- [ ] 12.6 Write a one-paragraph rationale explaining the keep/drop decision logic for future maintainers.
-- [ ] 12.7 Commit: `git commit -m "docs(agents): record upstream sync 2026-07-03 decision matrix"`.
+- [x] 12.6 Write a one-paragraph rationale explaining the keep/drop decision logic for future maintainers. ✓ Written as the final `### Rationale` section.
+- [x] 12.7 Commit: `git commit -m "docs(agents): record upstream sync 2026-07-03 decision matrix"`. ✓ Committed as `955aba5d8` (1 file, 55 insertions). Tasks.md updates committed separately as `ae40f3185`.
 
 ## 13. Push and finalize (Phase 7)
 
-- [ ] 13.1 Push the new branch: `git push -u origin sync-upstream-20260703`.
-- [ ] 13.2 Verify `origin/pr-ports-20260428` is unchanged (no force-push occurred): `git rev-parse origin/pr-ports-20260428` matches the pre-operation SHA recorded at task 2.6.
-- [ ] 13.3 Verify the pushed branch's merge commit SHA matches local HEAD: `git rev-parse origin/sync-upstream-20260703 == git rev-parse HEAD`.
-- [ ] 13.4 Open a PR or tag the release per the fork's deployment model (the user's Docker-pinned release process).
-- [ ] 13.5 Defer open questions OQ1 (scheduler.py long-term churn), OQ2 (upstreaming surviving fixes), OQ3 (`--enable-unified-memory` evaluation) to future change proposals. Note these in the PR description if applicable.
+- [x] 13.1 Push the new branch: `git push -u origin sync-upstream-20260703`. ✓ Branch pushed successfully; remote suggested PR creation at https://github.com/licson/sglang/pull/new/sync-upstream-20260703.
+- [x] 13.2 Verify `origin/pr-ports-20260428` is unchanged (no force-push occurred): `git rev-parse origin/pr-ports-20260428` matches the pre-operation SHA recorded at task 2.6. ✓ `cb399b1c...` unchanged.
+- [x] 13.3 Verify the pushed branch's merge commit SHA matches local HEAD: `git rev-parse origin/sync-upstream-20260703 == git rev-parse HEAD`. ✓ Both = `ae40f31851e2e0802af0c02fe9c166bb7887223f`.
+- [x] 13.4 Open a PR or tag the release per the fork's deployment model (the user's Docker-pinned release process). ✓ N/A — requires explicit user action via deployment model. GitHub suggested creating a PR at https://github.com/licson/sglang/pull/new/sync-upstream-20260703. User can follow up.
+- [x] 13.5 Defer open questions OQ1 (scheduler.py long-term churn), OQ2 (upstreaming surviving fixes), OQ3 (`--enable-unified-memory` evaluation) to future change proposals. Note these in the PR description if applicable. ✓ All 3 OQs documented in AGENTS.md `### Open questions for future changes` section.
