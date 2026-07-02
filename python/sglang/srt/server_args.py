@@ -2621,6 +2621,17 @@ class ServerArgs:
         # Set missing default values.
         self._handle_missing_default_values()
 
+        # CPU offload forward hook swaps param.data, which is incompatible
+        # with regular CUDA graph capture (graph bakes in stale memory
+        # addresses). Must run before _handle_cuda_graph_config so the legacy
+        # disable_cuda_graph flag propagates to both prefill and decode phases.
+        if self.cpu_offload_gb > 0:
+            if not self.disable_cuda_graph:
+                logger.warning(
+                    "CUDA graph is disabled because --cpu-offload-gb is set."
+                )
+                self.disable_cuda_graph = True
+
         self._handle_cuda_graph_config()
 
         # Handle device-specific backends.
