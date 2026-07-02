@@ -164,9 +164,9 @@ class GPTQMarlinMoEScheme(GPTQMoESchemeBase):
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
             if self.quant_config.desc_act:
-                w2_scales_size = intermediate_size_per_partition
-            else:
                 w2_scales_size = intermediate_size_per_partition * layer.moe_tp_size
+            else:
+                w2_scales_size = intermediate_size_per_partition
             scales_size2 = w2_scales_size // self.quant_config.group_size
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:

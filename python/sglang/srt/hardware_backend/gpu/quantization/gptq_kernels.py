@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -24,6 +25,8 @@ from sglang.srt.layers.quantization.utils import (
     replace_parameter,
     unpack_cols,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe import MoeRunnerConfig
@@ -357,7 +360,10 @@ class GPTQMarlinMoEKernel:
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
-        assert get_moe_runner_backend().is_auto()
+        if not get_moe_runner_backend().is_auto():
+            logger.warning(
+                "GPTQ Marlin MoE forces MARLIN backend; ignoring user-specified backend."
+            )
         self.moe_runner_config = moe_runner_config
         self.runner = MoeRunner(MoeRunnerBackend.MARLIN, moe_runner_config)
 
